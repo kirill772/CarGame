@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>Neon Rush: Turbo Racers</title>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="game" width="1280" height="720" aria-label="Neon Rush Canvas"></canvas>
+
+    <div id="ui-root" class="ui-root">
+      <div id="fade" class="fade"></div>
+
+      <div id="boot" class="boot">
+        <div class="boot-card">
+          <div class="boot-title">NEON RUSH</div>
+          <div class="boot-sub">Turbo Racers</div>
+          <div class="boot-bar"><div id="bootFill" class="boot-fill"></div></div>
+          <div id="bootText" class="boot-text">Инициализация…</div>
+          <div class="boot-hint">Нажми / тапни один раз, чтобы включить звук</div>
+        </div>
+      </div>
+
+      <div id="topbar" class="topbar hidden">
+        <div class="brand">
+          <div class="logo">NEON RUSH</div>
+          <div class="subtitle">Turbo Racers</div>
+        </div>
+
+        <div class="currency">
+          <span class="label">Neon Coins</span>
+          <span id="coinsValue" class="value">0</span>
+        </div>
+      </div>
+
+      <div id="screenMenu" class="screen">
+        <div class="panel">
+          <h1 class="title">Neon Rush: Turbo Racers</h1>
+          <p class="muted">Топ-даун аркадные гонки в неоновом киберпанке. 60 FPS. Canvas + ES6 Modules.</p>
+
+          <div class="grid">
+            <button id="btnCareer" class="btn primary btn-icon">
+              <span class="ico" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10l2 5v7H5v-7l2-5Z"/><path d="M7 7 5 12"/><path d="M17 7l2 5"/><path d="M7 16h10"/></svg>
+              </span>
+              Карьера
+            </button>
+            <button id="btnEndless" class="btn btn-icon">
+              <span class="ico" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12c0 4-3 7-7 7-3 0-4.5-1.5-6-3.5C6.5 13.5 5 12 3 12c-1 0-2 .5-2 2"/><path d="M3 12c0-4 3-7 7-7 3 0 4.5 1.5 6 3.5C17.5 10.5 19 12 21 12c1 0 2-.5 2-2"/></svg>
+              </span>
+              Endless Survival
+            </button>
+            <button id="btnGarage" class="btn btn-icon">
+              <span class="ico" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12 12 3l9 9"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg>
+              </span>
+              Гараж
+            </button>
+            <button id="btnShop" class="btn btn-icon">
+              <span class="ico" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h15l-1.5 9H7.5L6 7Z"/><path d="M6 7 5 4H2"/><path d="M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"/><path d="M18 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"/></svg>
+              </span>
+              Магазин
+            </button>
+            <button id="btnAchievements" class="btn btn-icon">
+              <span class="ico" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v3a5 5 0 0 1-10 0V4Z"/><path d="M5 5h2v2a3 3 0 0 1-2-2Z"/><path d="M19 5h-2v2a3 3 0 0 0 2-2Z"/></svg>
+              </span>
+              Достижения
+            </button>
+            <button id="btnSettings" class="btn btn-icon">
+              <span class="ico" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a7.9 7.9 0 0 0 .1-2l2-1.2-2-3.5-2.3.7a7.7 7.7 0 0 0-1.7-1L15 5h-6l-.5 2.9a7.7 7.7 0 0 0-1.7 1L4.5 8.3 2.5 11.8l2 1.2a7.9 7.9 0 0 0 .1 2l-2 1.2 2 3.5 2.3-.7a7.7 7.7 0 0 0 1.7 1L9 19h6l.5-2.9a7.7 7.7 0 0 0 1.7-1l2.3.7 2-3.5-2.1-1.2Z"/></svg>
+              </span>
+              Настройки
+            </button>
+          </div>
+
+          <div class="hint">
+            <div><b>Управление:</b> WASD/Стрелки — поворот/газ/тормоз, <b>Shift</b> — нитро, <b>Space</b> — пауза/подтверждение.</div>
+            <div class="muted">На мобилке — виртуальный джойстик. Поддерживается gamepad.</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="screenOverlayList" class="screen hidden">
+        <div class="panel wide">
+          <div class="header">
+            <h2 id="overlayTitle" class="title2">Список</h2>
+            <button id="btnOverlayBack" class="btn small">Назад</button>
+          </div>
+          <div id="overlayBody" class="overlay-body"></div>
+        </div>
+      </div>
+
+      <div id="hud" class="hud hidden">
+        <div class="hud-left">
+          <div class="meter">
+            <div class="meter-label">Здоровье</div>
+            <div class="meter-bar"><div id="hpBar" class="meter-fill hp"></div></div>
+          </div>
+
+          <div class="meter">
+            <div class="meter-label">Нитро</div>
+            <div class="meter-bar"><div id="nitroBar" class="meter-fill nitro"></div></div>
+          </div>
+
+          <div class="hud-row">
+            <div class="pill"><span class="k">Скорость</span><span id="speedValue" class="v">0</span></div>
+            <div class="pill"><span class="k">Позиция</span><span id="posValue" class="v">-</span></div>
+            <div class="pill"><span class="k">Круг</span><span id="lapValue" class="v">-</span></div>
+          </div>
+        </div>
+
+        <div class="hud-right">
+          <div class="minimap">
+            <canvas id="minimap" width="220" height="140"></canvas>
+            <div class="minimap-label">МИНИ-КАРТА</div>
+          </div>
+          <div class="pill big">
+            <span class="k">Трасса</span>
+            <span id="trackValue" class="v">—</span>
+          </div>
+          <div class="pill big">
+            <span class="k">Режим</span>
+            <span id="modeValue" class="v">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="pause" class="pause hidden">
+        <div class="panel">
+          <h2 class="title2">Пауза</h2>
+          <div class="grid">
+            <button id="btnResume" class="btn primary">Продолжить</button>
+            <button id="btnRestart" class="btn">Рестарт</button>
+            <button id="btnQuit" class="btn danger">В меню</button>
+          </div>
+          <p class="muted small">Space — продолжить</p>
+        </div>
+      </div>
+
+      <div id="toast" class="toast hidden"></div>
+
+      <div id="touchControls" class="touch hidden">
+        <div id="stickBase" class="stick-base">
+          <div id="stickKnob" class="stick-knob"></div>
+        </div>
+
+        <div class="touch-buttons">
+          <button id="btnTouchNitro" class="btn-touch">NITRO</button>
+          <button id="btnTouchBrake" class="btn-touch">BRAKE</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

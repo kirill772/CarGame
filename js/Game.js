@@ -1,0 +1,1376 @@
+// Game.js
+// Основной игровой класс: состояния, физика, генерация, столкновения, UI/HUD.
+
+import { CANVAS_W, CANVAS_H, GAME_MODES, ROAD, PLAYER, TRAFFIC, POWERUPS, TRACKS, ECONOMY } from "./constants.js";
+import { clamp, lerp, rand, randInt, pick, rectsOverlap, fmtInt } from "./utils.js";
+import { Track } from "./world/Track.js";
+import { PlayerCar } from "./classes/PlayerCar.js";
+import { TrafficCar } from "./classes/TrafficCar.js";
+import { RivalCar } from "./classes/RivalCar.js";
+import { PowerUp } from "./classes/PowerUp.js";
+import { ParticleSystem } from "./managers/ParticleSystem.js";
+import { CarsData } from "./data/CarsData.js";
+import { AchievementsData } from "./data/AchievementsData.js";
+import { Speedometer } from "./managers/Speedometer.js";
+
+// Вспомогательные функции
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawGlow(ctx, x, y, r, color, a) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, `rgba(255,255,255,${a})`);
+  g.addColorStop(0.25, colorToRgba(color, a));
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(x - r, y - r, r * 2, r * 2);
+}
+
+function colorToRgba(hex, a) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+export class Game {
+  constructor({ canvas, ctx, save, ui, input, audio }) {
+    this.canvas = canvas;
+    this.ctx = ctx;
+    this.save = save;
+    this.ui = ui;
+    this.input = input;
+    this.audio = audio;
+
+    this.state = "menu"; // menu | playing | paused | gameover | overlay
+
+    this.track = new Track(TRACKS[0].id);
+
+    this.player = new PlayerCar();
+
+    // трафик-пул
+    this.trafficPool = [];
+    for (let i = 0; i < TRAFFIC.poolSize; i++) this.trafficPool.push(new TrafficCar());
+
+    // powerups
+    this.powerUps = [];
+    for (let i = 0; i < 10; i++) this.powerUps.push(new PowerUp());
+
+    // соперники для карьеры
+    this.rivals = [];
+    for (let i = 0; i < 6; i++) this.rivals.push(new RivalCar(i));
+
+    this.particles = new ParticleSystem(this.save.settings.lowGraphics ? 420 : 900);
+
+    this.speedometer = new Speedometer();
+
+    this.cameraZ = 0;
+    this.worldTime = 0;
+
+    // режим
+    this.mode = GAME_MODES.ENDLESS;
+    this.career = {
+      lapsTotal: 3,
+      lap: 1,
+      started: false,
+      finished: false,
+      startZ: 0,
+      time: 0,
+    };
+
+    // экономика в заезде
+    this.run = {
+      distance: 0,
+      coinsEarned: 0,
+      overtakes: 0,
+      surviveTime: 0,
+      crashes: 0,
+      bestNoCrashThisRun: 0,
+    };
+
+    // спавн таймеры
+    this._trafficSpawnT = 0;
+    this._powerSpawnT = 0;
+
+    // полоса/границы
+    this.laneXs = this._calcLaneCenters();
+
+    // миникарта
+    this.minimapCtx = document.getElementById("minimap").getContext("2d");
+
+    this._applySelectedCar();
+    this.ui.setCoins(this.save.wallet.coins);
+  }
+
+  _calcLaneCenters() {
+    const laneW = ROAD.laneWidth;
+    const centers = [];
+    const half = (ROAD.lanes - 1) / 2;
+    for (let i = 0; i < ROAD.lanes; i++) {
+      centers.push((i - half) * laneW);
+    }
+    return centers;
+  }
+
+  _applySelectedCar() {
+    const id = this.save.garage.selectedCarId;
+    const car = CarsData.find(c => c.id === id) || CarsData[0];
+    const up = this.save.upgrades[id] || { maxSpeed: 1, acceleration: 1, handling: 1, nitroPower: 1, durability: 1 };
+
+    const upgradesMult = {
+      maxSpeed: 1 + (Math.max(1, up.maxSpeed) - 1) * ECONOMY.upgradeDeltaPerLevel,
+      acceleration: 1 + (Math.max(1, up.acceleration) - 1) * ECONOMY.upgradeDeltaPerLevel,
+      handling: 1 + (Math.max(1, up.handling) - 1) * ECONOMY.upgradeDeltaPerLevel,
+      nitroPower: 1 + (Math.max(1, up.nitroPower) - 1) * ECONOMY.upgradeDeltaPerLevel,
+      durability: 1 + (Math.max(1, up.durability) - 1) * ECONOMY.upgradeDeltaPerLevel,
+    };
+
+    this.player.applyCarConfig({ baseStats: car.stats, upgradesMult, skin: this.save.garage.selectedSkin ?? "#00e5ff", carData: car });
+  }
+
+  onUIAction(action) {
+    if (action === "startEndless") {
+      this.ui.fadeOutIn(() => this.startRun(GAME_MODES.ENDLESS));
+    }
+
+    if (action === "startCareer") {
+      this.ui.fadeOutIn(() => this.startRun(GAME_MODES.CAREER));
+    }
+
+    if (action === "openShop") {
+      this.openOverlay("shop");
+    }
+
+    if (action === "openGarage") {
+      this.openOverlay("garage");
+    }
+
+    if (action === "openAchievements") {
+      this.openOverlay("achievements");
+    }
+
+    if (action === "openSettings") {
+      this.openOverlay("settings");
+    }
+
+    if (action === "closeOverlay") {
+      this.ui.hideOverlay();
+      this.ui.showMenu();
+      this.state = "menu";
+    }
+
+    if (action === "resume") {
+      if (this.state === "paused") {
+        this.state = "playing";
+        this.ui.showPause(false);
+      }
+    }
+
+    if (action === "restart") {
+      if (this.state === "paused" || this.state === "gameover") {
+        this.ui.fadeOutIn(() => this.startRun(this.mode));
+      }
+    }
+
+    if (action === "quitToMenu") {
+      this.ui.fadeOutIn(() => {
+        this.state = "menu";
+        this.ui.showMenu();
+      });
+    }
+  }
+
+  openOverlay(kind) {
+    this.state = "overlay";
+
+    if (kind === "settings") {
+      this.ui.showOverlay("Настройки", this._settingsHTML());
+      this._bindSettings();
+      return;
+    }
+
+    if (kind === "achievements") {
+      this._fireEvent("openAchievements");
+      this.ui.showOverlay("Достижения + миссии дня", this._achievementsHTML());
+      this._bindAchievements();
+      return;
+    }
+
+    if (kind === "shop") {
+      this._fireEvent("openShop");
+      // lazy import, чтобы не держать лишнее в памяти
+      import("./managers/ShopManager.js").then(({ ShopManager }) => {
+        if (!this.shop) {
+          this.shop = new ShopManager({
+            save: this.save,
+            onSpendCoins: (n) => this._spendCoins(n),
+            onBuyCar: () => this.ui.setCoins(this.save.wallet.coins),
+            onSkin: () => this._applySelectedCar(),
+            onSelectCar: () => this._applySelectedCar(),
+            onEvent: (e, v) => this._fireEvent(e, v),
+          });
+        }
+        this.ui.showOverlay("Магазин", this.shop.renderHTML());
+        this.shop.bind(this.ui.overlayBody);
+      });
+      return;
+    }
+
+    if (kind === "garage") {
+      import("./managers/GarageManager.js").then(({ GarageManager }) => {
+        try {
+          this.garage = new GarageManager({
+            save: this.save,
+            onSpendCoins: (n) => this._spendCoins(n),
+            onEvent: (e, v) => this._fireEvent(e, v),
+          });
+          this.ui.showOverlay("Гараж", this.garage.renderHTML());
+          this.garage.bind(this.ui.overlayBody);
+          this._applySelectedCar();
+        } catch (e) {
+          console.error("Garage error:", e);
+          this.ui.toastMsg("Ошибка гаража: " + e.message);
+        }
+      }).catch(err => {
+        console.error("Failed to import GarageManager:", err);
+        this.ui.toastMsg("Не удалось загрузить гараж");
+      });
+      return;
+    }
+  }
+
+  _settingsHTML() {
+    const s = this.save.settings;
+    return `
+      <div class="card" style="grid-column:1/-1;">
+        <div class="row"><h3>Графика</h3><span class="badge">Canvas</span></div>
+        <div class="row" style="margin-top:10px;gap:14px;align-items:center;">
+          <label class="muted small" style="flex:1;">Частицы</label>
+          <input id="setParticles" type="checkbox" ${s.showParticles ? "checked" : ""} />
+        </div>
+        <div class="row" style="margin-top:10px;gap:14px;align-items:center;">
+          <label class="muted small" style="flex:1;">Low Graphics</label>
+          <input id="setLow" type="checkbox" ${s.lowGraphics ? "checked" : ""} />
+        </div>
+      </div>
+
+      <div class="card" style="grid-column:1/-1;">
+        <div class="row"><h3>Звук</h3><span class="badge">WebAudio</span></div>
+        <div class="muted small">Звук включится после первого клика/тапа (требование браузеров).</div>
+        <div style="margin-top:10px;display:grid;gap:10px;">
+          <div class="row" style="gap:12px;align-items:center;"><span class="muted small" style="width:120px;">Master</span><input id="setMaster" type="range" min="0" max="1" step="0.01" value="${s.master}"></div>
+          <div class="row" style="gap:12px;align-items:center;"><span class="muted small" style="width:120px;">Music</span><input id="setMusic" type="range" min="0" max="1" step="0.01" value="${s.music}"></div>
+          <div class="row" style="gap:12px;align-items:center;"><span class="muted small" style="width:120px;">SFX</span><input id="setSfx" type="range" min="0" max="1" step="0.01" value="${s.sfx}"></div>
+        </div>
+      </div>
+
+      <div class="card" style="grid-column:1/-1;">
+        <div class="row"><h3>Сервис</h3><span class="badge">localStorage</span></div>
+        <div class="row" style="margin-top:10px;">
+          <button class="btn small danger" id="btnResetSave">Сбросить прогресс</button>
+          <button class="btn small" id="btnTestBeep">Тест звука</button>
+        </div>
+      </div>
+
+      <button class="btn primary" data-action="close" style="grid-column:1/-1; margin-top:16px;">Закрыть</button>
+    `;
+  }
+
+  _bindSettings() {
+    const root = this.ui.overlayBody;
+    const s = this.save.settings;
+
+    root.querySelector("#setParticles")?.addEventListener("change", (e) => {
+      s.showParticles = !!e.target.checked;
+    });
+    root.querySelector("#setLow")?.addEventListener("change", (e) => {
+      s.lowGraphics = !!e.target.checked;
+      this.particles = new ParticleSystem(s.lowGraphics ? 420 : 900);
+    });
+
+    const sync = () => this.audio.syncSettings();
+    root.querySelector("#setMaster")?.addEventListener("input", (e) => { s.master = Number(e.target.value); sync(); });
+    root.querySelector("#setMusic")?.addEventListener("input", (e) => { s.music = Number(e.target.value); sync(); });
+    root.querySelector("#setSfx")?.addEventListener("input", (e) => { s.sfx = Number(e.target.value); sync(); });
+
+    root.querySelector("#btnResetSave")?.addEventListener("click", () => {
+      // мягкий сброс
+      if (!confirm("Сбросить прогресс?")) return;
+      localStorage.removeItem("neon_rush_save_v1");
+      location.reload();
+    });
+
+    root.querySelector("#btnTestBeep")?.addEventListener("click", () => {
+      this.audio.start().then(() => {
+        this.audio.resumeIfSuspended();
+        this.audio.playBeep("ok");
+      });
+    });
+
+    root.querySelectorAll("[data-action='close']").forEach(btn => {
+      btn.addEventListener("click", () => {
+        this.ui.hideOverlay();
+        this.ui.showMenu();
+      });
+    });
+  }
+
+  _achievementsHTML() {
+    const coins = this.save.wallet.coins;
+    const daily = this.save.daily;
+
+    const dailyHTML = daily.missions.map(m => {
+      const p = this._getDailyProgress(m);
+      const done = !!daily.completed[m.id];
+      const pct = clamp(p / m.target, 0, 1);
+      return `
+        <div class="card">
+          <div class="row"><h3>${m.title}</h3><span class="badge">+${m.reward} NC</span></div>
+          <div class="muted small">Прогресс: ${Math.min(m.target, Math.floor(p))}/${m.target} ${done ? "(выполнено)" : ""}</div>
+          <div class="meter-bar" style="margin-top:8px;"><div class="meter-fill nitro" style="width:${pct*100}%"></div></div>
+          <div class="row" style="margin-top:10px;">
+            <button class="btn small primary" data-action="claimDaily" data-id="${m.id}" ${(!done && p>=m.target) ? "" : "disabled"}>Забрать</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    const achHTML = AchievementsData.map(a => {
+      const st = this.save.achievements[a.id];
+      const unlocked = !!st?.unlockedAt;
+      const prog = this._getAchievementProgress(a);
+      const target = a.target ?? 1;
+      const pct = a.type === "event" ? (unlocked ? 1 : 0) : clamp(prog / target, 0, 1);
+      return `
+        <div class="card">
+          <div class="row"><h3>${a.title}</h3><span class="badge">${unlocked ? "Открыто" : `+${a.reward} NC`}</span></div>
+          <div class="muted small">${a.desc}</div>
+          <div class="meter-bar" style="margin-top:8px;"><div class="meter-fill hp" style="width:${pct*100}%"></div></div>
+          <div class="muted small" style="margin-top:8px;">${a.type === "event" ? "Событие" : `Прогресс: ${Math.floor(prog)}/${target}`}</div>
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div class="card" style="grid-column:1/-1;">
+        <div class="row"><h3>Баланс</h3><span class="badge">${fmtInt(coins)} NC</span></div>
+        <div class="muted small">Ежедневные миссии обновляются раз в день.</div>
+      </div>
+
+      <div class="card" style="grid-column:1/-1;"><h3>Миссии дня</h3></div>
+      ${dailyHTML}
+
+      <div class="card" style="grid-column:1/-1;"><h3>Достижения</h3></div>
+      ${achHTML}
+
+      <button class="btn primary" data-action="close" style="grid-column:1/-1; margin-top:16px;">Закрыть</button>
+    `;
+  }
+
+  _bindAchievements() {
+    const root = this.ui.overlayBody;
+    root.querySelectorAll("[data-action='claimDaily']").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-id");
+        const m = this.save.daily.missions.find(x => x.id === id);
+        if (!m) return;
+        const p = this._getDailyProgress(m);
+        if (p < m.target) return;
+        if (this.save.daily.completed[id]) return;
+        this.save.daily.completed[id] = true;
+        this._addCoins(m.reward);
+        this.ui.toastMsg(`Миссия выполнена: +${m.reward} NC`);
+      });
+    });
+    root.querySelectorAll("[data-action='close']").forEach(btn => {
+      btn.addEventListener("click", () => {
+        this.ui.hideOverlay();
+        this.ui.showMenu();
+      });
+    });
+  }
+
+  _getDailyProgress(m) {
+    if (m.type === "distance") return this.save.stats.totalDistance;
+    if (m.type === "overtake") return this.save.stats.totalOvertakes;
+    if (m.type === "survive") return this.save.stats.bestNoCrash;
+    return 0;
+  }
+
+  _getAchievementProgress(a) {
+    const s = this.save.stats;
+    if (a.type === "totalDistance") return s.totalDistance;
+    if (a.type === "totalOvertakes") return s.totalOvertakes;
+    if (a.type === "totalNitroSeconds") return s.totalNitroSeconds;
+    if (a.type === "totalCrashes") return s.totalCrashes;
+    if (a.type === "totalRaces") return s.totalRaces;
+    if (a.type === "totalWins") return s.totalWins;
+    if (a.type === "totalCoinsEarned") return s.totalCoinsEarned;
+    if (a.type === "totalPlayTime") return s.totalPlayTime;
+    if (a.type === "endlessBestDistance") return this.save.records.endlessBestDistance;
+    if (a.type === "bestSurvive") return s.bestSurvive;
+    if (a.type === "bestNoCrash") return s.bestNoCrash;
+    return 0;
+  }
+
+  startRun(mode) {
+    this.mode = mode;
+    this.state = "playing";
+
+    // выбираем трассу случайно
+    const trackId = pick(TRACKS).id;
+    this.track.setTrack(trackId);
+
+    this._applySelectedCar();
+
+    this.player.reset();
+    this.player.x = 0;
+    this.player.z = 0;
+
+    this.cameraZ = 0;
+    this.worldTime = 0;
+
+    this.run = { distance: 0, coinsEarned: 0, overtakes: 0, surviveTime: 0, crashes: 0, bestNoCrashThisRun: 0 };
+
+    // очистка трафика
+    for (const c of this.trafficPool) c.reset();
+
+    // очистка powerups
+    for (const p of this.powerUps) p.active = false;
+
+    // карьера
+    this.career = {
+      lapsTotal: randInt(3, 5),
+      lap: 1,
+      started: true,
+      finished: false,
+      startZ: 0,
+      time: 0,
+    };
+
+    if (mode === GAME_MODES.CAREER) {
+      // стартовая решётка
+      const baseZ = 0;
+      const back = 260;
+      for (let i = 0; i < this.rivals.length; i++) {
+        const lane = i % this.laneXs.length;
+        const row = Math.floor(i / this.laneXs.length);
+        this.rivals[i].resetForRace({
+          startX: this.laneXs[lane] + rand(-10, 10),
+          startZ: baseZ - back - row * 160,
+          baseSpeed: 680 + i * 18,
+        });
+      }
+      this.player.z = baseZ;
+      this.player.speed = 0;
+    }
+
+    this.ui.hideMenu();
+    this.ui.hideOverlay();
+    this.ui.showHUD(true);
+    this.ui.showPause(false);
+
+    this.ui.toastMsg(mode === GAME_MODES.CAREER ? `Карьера: ${this.career.lapsTotal} круг(а)` : "Endless Survival");
+
+    // фиксируем событие “игра на трассе”
+    if (mode === GAME_MODES.ENDLESS) this._fireEvent(`endlessTrack_${this.track.id}`);
+  }
+
+  update(dt) {
+    // статистика времени
+    if (this.state === "playing") {
+      this.save.stats.totalPlayTime += dt;
+    }
+
+    // пауза
+    const inp = this.input.poll();
+    inp.perks = this.save.perks;
+
+    if (inp.pausePressed) {
+      if (this.state === "playing") {
+        this.state = "paused";
+        this.ui.showPause(true);
+      } else if (this.state === "paused") {
+        this.state = "playing";
+        this.ui.showPause(false);
+      }
+    }
+
+    if (this.state !== "playing") {
+      // аудио в паузе приглушаем
+      this.audio.updateEngine(this.player.engineRpm, this.player.maxSpeed ? this.player.speed / this.player.maxSpeed : 0, false, true);
+      this.audio.updateDrift(0, true);
+      return;
+    }
+
+    this.worldTime += dt;
+
+    // slowmo
+    let worldDt = dt;
+    if (this.player.slowmoTime > 0) worldDt *= 0.55;
+
+    // кривая трассы
+    const curve = this.track.sampleCurve(this.cameraZ + 260);
+
+    // апдейт игрока
+    this.player.update(worldDt, inp, curve);
+
+    // апдейт спидометра
+    this.speedometer.update(worldDt, this.player.speed, this.player.maxSpeed, this.player.nitro);
+
+    // границы дороги + “отскок” от бордюра
+    // важно: коллизии должны совпадать с видимой проезжей частью (без обочины)
+    const halfRoad = (ROAD.lanes * ROAD.laneWidth) / 2;
+    const limit = halfRoad;
+    if (this.player.x < -limit) {
+      this.player.x = -limit;
+      this.player.vx *= -0.22;
+      this.player.speed *= 0.99;
+    }
+    if (this.player.x > limit) {
+      this.player.x = limit;
+      this.player.vx *= -0.22;
+      this.player.speed *= 0.99;
+    }
+
+    // “камера” догоняет скорость
+    this.cameraZ += this.player.speed * worldDt * ROAD.scrollFactor;
+
+    // пробег
+    this.run.distance += this.player.speed * worldDt;
+    this.run.surviveTime += dt;
+    this.run.bestNoCrashThisRun = Math.max(this.run.bestNoCrashThisRun, this.player.noCrashTime);
+
+    // карьера — время и круги
+    if (this.mode === GAME_MODES.CAREER) {
+      this.career.time += dt;
+
+      // круги по длине трассы
+      const lapZ = this.cameraZ % this.track.lengthZ;
+      if (lapZ < 60 && this.run.distance > 200) {
+        // пересечение линии старта (упрощенно)
+        if (this._lapLatch !== true) {
+          this._lapLatch = true;
+          this.career.lap += 1;
+          if (this.career.lap > this.career.lapsTotal) {
+            this._finishCareer();
+          }
+        }
+      } else {
+        this._lapLatch = false;
+      }
+    }
+
+    // спавн трафика
+    this._trafficSpawnT += worldDt;
+    const spawnRate = (this.mode === GAME_MODES.ENDLESS) ? TRAFFIC.spawnPerSecond : (TRAFFIC.spawnPerSecond * 0.85);
+    const spawnStep = 1 / spawnRate;
+    while (this._trafficSpawnT >= spawnStep) {
+      this._trafficSpawnT -= spawnStep;
+      this._spawnTrafficAhead();
+    }
+
+    // спавн powerups
+    this._powerSpawnT += worldDt;
+    const pStep = 1 / POWERUPS.spawnPerSecond;
+    if (this._powerSpawnT >= pStep) {
+      this._powerSpawnT = 0;
+      this._spawnPowerUpAhead();
+    }
+
+    // апдейт трафика + удаление позади
+    for (const c of this.trafficPool) {
+      if (!c.active) continue;
+      c.update(worldDt);
+
+      // простое разделение: машины держатся в полосе, избегая столкновений
+      let closest = null;
+      let minDz = Infinity;
+      for (const other of this.trafficPool) {
+        if (!other.active || other === c) continue;
+        const dz = other.z - c.z;
+        const dx = Math.abs(other.x - c.x);
+        if (dz > 0 && dz < 300 && dx < 70) {
+          if (dz < minDz) {
+            minDz = dz;
+            closest = other;
+          }
+        }
+      }
+      // если впереди машина — немного притормозим или сместимся
+      if (closest) {
+        const dz = closest.z - c.z;
+        const dx = closest.x - c.x;
+        if (dz < 200 && Math.abs(dx) < 60) {
+          // притормозим
+          c.speed = Math.max(c.speed * 0.94, TRAFFIC.minSpeed);
+          // если есть место — сместимся вбок
+          if (Math.abs(dx) < 20) {
+            const shift = dx > 0 ? -12 : 12;
+            c.x += shift * worldDt;
+          }
+        }
+      }
+
+      // трафик “стоит” в мире, но относительно камеры он приближается
+      // тут ничего менять не надо — render через toScreen(cameraZ)
+
+      // деактивация если сильно позади
+      if (c.z < this.cameraZ - 400) {
+        c.active = false;
+      }
+    }
+
+    // апдейт powerups
+    for (const p of this.powerUps) {
+      if (!p.active) continue;
+      p.update(worldDt);
+      if (p.z < this.cameraZ - 400) p.active = false;
+    }
+
+    // соперники
+    if (this.mode === GAME_MODES.CAREER) {
+      const obstacles = this.trafficPool.filter(o => o.active);
+      for (const r of this.rivals) {
+        r.updateAI(worldDt, { track: this.track, laneXs: this.laneXs, obstacles });
+        r.z += r.speed * worldDt;
+        if (r.z < this.cameraZ - 400) r.z = this.cameraZ - 200; // защита от отставания в логике
+      }
+    }
+
+    // частицы
+    if (this.save.settings.showParticles) {
+      // неоновый след
+      const px = CANVAS_W * 0.5 + this.player.x * 0.62;
+      const py = CANVAS_H * 0.78;
+      const trailInt = clamp(this.player.speed / (this.player.maxSpeed + 1), 0, 1);
+      this.particles.emitNeonTrail(px, py, this.player.skin, trailInt);
+
+      // дым дрифта
+      if (this.player.driftHeat > 0.1) {
+        this.particles.emitDriftSmoke(px, py, this.player.driftHeat, this.player.skin);
+      }
+
+      // дождь иногда на трассах
+      if (this.track.theme === "city" || this.track.theme === "megacity" || this.track.theme === "highway") {
+        if (Math.random() < 0.10 * worldDt) this.particles.emitRain(CANVAS_W, CANVAS_H, 0.8);
+      }
+
+      this.particles.update(worldDt);
+    }
+
+    // столкновения
+    this._handleCollisions();
+
+    // экономика — монеты за время и дистанцию
+    this._earnCoinsOverTime(dt);
+
+    // HUD
+    const hp01 = this.player.health / PLAYER.healthMax;
+    const nitro01 = this.player.nitro / PLAYER.nitroMax;
+    const speedKmh = (this.player.speed * 0.11); // “условный” перевод
+
+    const posText = this.mode === GAME_MODES.CAREER ? this._calcRacePositionText() : "—";
+    const lapText = this.mode === GAME_MODES.CAREER ? `${Math.min(this.career.lap, this.career.lapsTotal)}/${this.career.lapsTotal}` : "—";
+
+    this.ui.setHUD({ hp01, nitro01, speedKmh, posText, lapText, trackId: this.track.id, mode: this.mode });
+
+    // аудио
+    this.audio.updateEngine(this.player.engineRpm, this.player.maxSpeed ? this.player.speed / this.player.maxSpeed : 0, inp.nitro, false);
+    this.audio.updateDrift(this.player.driftHeat, false);
+
+    // статистика
+    this.save.stats.totalNitroSeconds += inp._nitroSeconds;
+    this.save.stats.bestNoCrash = Math.max(this.save.stats.bestNoCrash, this.player.noCrashTime);
+    this.save.stats.bestSurvive = Math.max(this.save.stats.bestSurvive, this.run.surviveTime);
+
+    // достижений с прогрессом — проверяем периодически
+    if ((this.worldTime % 0.5) < dt) this._checkProgressAchievements();
+
+    // game over
+    if (this.player.health <= 0) {
+      this._gameOver();
+    }
+  }
+
+  _earnCoinsOverTime(dt) {
+    const bonus = 1 + (this.save.perks.coinBonus ?? 0) * 0.05;
+
+    const baseTime = this.mode === GAME_MODES.ENDLESS ? ECONOMY.coinsPerSecondEndless : 0.7;
+    const cTime = baseTime * dt * bonus;
+
+    const cDist = (this.player.speed * dt / 1000) * ECONOMY.coinsPerKm * bonus;
+
+    const add = cTime + cDist;
+    this.run.coinsEarned += add;
+
+    // начисляем “мягко” целыми
+    const whole = Math.floor(this.run.coinsEarned);
+    if (whole > 0) {
+      this.run.coinsEarned -= whole;
+      this._addCoins(whole);
+    }
+  }
+
+  _spawnTrafficAhead() {
+    // ограничение активных
+    let active = 0;
+    for (const c of this.trafficPool) if (c.active) active++;
+    if (active >= TRAFFIC.maxActive) return;
+
+    const car = this.trafficPool.find(x => !x.active);
+    if (!car) return;
+
+    const ahead = this.cameraZ + rand(900, 1800);
+    const lane = randInt(0, this.laneXs.length - 1);
+    const x = this.laneXs[lane] + rand(-18, 18);
+
+    // проверка: не спавнить слишком близко к другим машинам
+    for (const other of this.trafficPool) {
+      if (!other.active) continue;
+      const dz = Math.abs(other.z - ahead);
+      const dx = Math.abs(other.x - x);
+      if (dz < TRAFFIC.minSpawnGap && dx < 80) {
+        // слишком близко, отменим спавн
+        return;
+      }
+    }
+
+    const speed = rand(TRAFFIC.minSpeed, TRAFFIC.maxSpeed);
+    car.spawn({ x, z: ahead, speed });
+  }
+
+  _spawnPowerUpAhead() {
+    const pu = this.powerUps.find(x => !x.active);
+    if (!pu) return;
+
+    const ahead = this.cameraZ + rand(1100, 2400);
+    const lane = randInt(0, this.laneXs.length - 1);
+    const x = this.laneXs[lane] + rand(-18, 18);
+    pu.spawn({ x, z: ahead });
+  }
+
+  _handleCollisions() {
+    const playerScreen = this._playerAABB();
+
+    // трафик
+    for (const c of this.trafficPool) {
+      if (!c.active) continue;
+
+      const aabb = this._trafficAABB(c);
+      if (!aabb) continue;
+
+      if (rectsOverlap(playerScreen.x, playerScreen.y, playerScreen.w, playerScreen.h, aabb.x, aabb.y, aabb.w, aabb.h)) {
+        // столкновение
+        const rel = clamp(this.player.speed / (this.player.maxSpeed + 1), 0, 1);
+        const res = this.player.crash(0.8 + rel * 0.4);
+
+        this.run.crashes += 1;
+        this.save.stats.totalCrashes += 1;
+
+        if (!res.shielded) {
+          // урон только скорости/здоровья, без штрафа монет
+          this.ui.toastMsg("СТОЛКНОВЕНИЕ! Урон");
+        } else {
+          this.ui.toastMsg("Щит спас от урона");
+        }
+
+        if (this.save.settings.showParticles) {
+          this.particles.emitSparks(CANVAS_W * 0.5, CANVAS_H * 0.72, 1.0);
+        }
+        this.audio.playBeep("bad");
+
+        // чтобы не “молотить” урон каждую рамку — отбрасываем трафик вперёд
+        c.z += 200;
+        break;
+      }
+
+      // обгон: если машина была впереди, а стала позади
+      if (!c._wasBehind && c.z < this.cameraZ + 40) {
+        c._wasBehind = true;
+        this.run.overtakes += 1;
+        this.save.stats.totalOvertakes += 1;
+        this._addCoins(ECONOMY.coinsPerOvertake);
+      }
+    }
+
+    // powerups
+    for (const p of this.powerUps) {
+      if (!p.active) continue;
+      const ps = this.toScreen(p.x, p.z, this.cameraZ);
+      if (!ps.visible) continue;
+
+      const r = p.radius * ps.scale;
+      const aabb = { x: ps.x - r, y: ps.y - r, w: r * 2, h: r * 2 };
+
+      if (rectsOverlap(playerScreen.x, playerScreen.y, playerScreen.w, playerScreen.h, aabb.x, aabb.y, aabb.w, aabb.h)) {
+        p.active = false;
+        this._applyPowerUp(p.id);
+        this._fireEvent(`powerup_${p.id}`);
+        this.audio.playBeep("ok");
+      }
+    }
+  }
+
+  _applyPowerUp(id) {
+    if (id === "nitro") {
+      this.player.nitro = Math.min(PLAYER.nitroMax, this.player.nitro + 45);
+      this.ui.toastMsg("Power-Up: Нитро");
+      this._fireEvent("nitroUse");
+      this.audio.playNitro?.();
+    }
+    if (id === "shield") {
+      this.player.shieldTime = Math.max(this.player.shieldTime, 6.0);
+      this.ui.toastMsg("Power-Up: Щит");
+    }
+    if (id === "repair") {
+      const bonus = 1 + (this.save.perks.repairBonus ?? 0) * 0.10;
+      this.player.health = Math.min(PLAYER.healthMax, this.player.health + 28 * bonus);
+      this.ui.toastMsg("Power-Up: Ремонт");
+    }
+    if (id === "slowmo") {
+      this.player.slowmoTime = Math.max(this.player.slowmoTime, 4.5);
+      this.ui.toastMsg("Power-Up: Слоумо");
+    }
+    if (id === "magnet") {
+      this.player.magnetTime = Math.max(this.player.magnetTime, 8.0);
+      this.ui.toastMsg("Power-Up: Магнит монет");
+      // в текущей версии “магнит” усиливает доход
+      this._addCoins(40);
+    }
+  }
+
+  _playerAABB() {
+    // игрок рисуется внизу, привязка
+    const cx = CANVAS_W * 0.5 + this.player.x * 0.62;
+    const cy = CANVAS_H * 0.78;
+    return { x: cx - 28, y: cy - 58, w: 56, h: 116 };
+  }
+
+  _trafficAABB(car) {
+    const p = this.toScreen(car.x, car.z, this.cameraZ);
+    if (!p.visible) return null;
+    const w = car.w * p.scale;
+    const h = car.h * p.scale;
+    return { x: p.x - w / 2, y: p.y - h / 2, w, h };
+  }
+
+  _calcRacePositionText() {
+    // сравним z игрока и соперников (примерно)
+    const playerZ = this.cameraZ;
+    let ahead = 0;
+    for (const r of this.rivals) {
+      if (r.z > playerZ) ahead++;
+    }
+    const pos = ahead + 1;
+    return `${pos}/7`;
+  }
+
+  _finishCareer() {
+    if (this.career.finished) return;
+    this.career.finished = true;
+    this.save.stats.totalRaces += 1;
+
+    const pos = parseInt(this._calcRacePositionText().split("/")[0], 10);
+
+    let reward = 0;
+    if (pos === 1) {
+      reward = ECONOMY.coinsWinCareer;
+      this.save.stats.totalWins += 1;
+      this._fireEvent("careerWinTrack");
+      this.ui.toastMsg("ФИНИШ: Победа!");
+    } else if (pos <= 3) {
+      reward = ECONOMY.coinsPodiumCareer;
+      this._fireEvent("careerPodium");
+      this.ui.toastMsg("ФИНИШ: Подиум!");
+    } else {
+      reward = 90;
+      this.ui.toastMsg("ФИНИШ: Гонка завершена");
+    }
+
+    this._addCoins(reward);
+
+    // рекорд времени
+    const best = this.save.records.careerBestTimeByTrack[this.track.id];
+    if (!best || this.career.time * 1000 < best) {
+      this.save.records.careerBestTimeByTrack[this.track.id] = Math.floor(this.career.time * 1000);
+    }
+
+    this._gameOver(true);
+  }
+
+  _gameOver(victory = false) {
+    this.state = "gameover";
+    this.ui.showPause(true);
+
+    // обновим рекорд endless
+    if (this.mode === GAME_MODES.ENDLESS) {
+      const d = Math.floor(this.run.distance);
+      this.save.stats.totalDistance += d;
+      if (d > this.save.records.endlessBestDistance) this.save.records.endlessBestDistance = d;
+      this.save.records.endlessBestByTrack[this.track.id] = Math.max(this.save.records.endlessBestByTrack[this.track.id] || 0, d);
+    }
+
+    this._checkProgressAchievements();
+
+    if (!victory) this.audio.playExplosion();
+  }
+
+  _addCoins(n) {
+    this.save.wallet.coins += Math.max(0, Math.floor(n));
+    this.save.stats.totalCoinsEarned += Math.max(0, Math.floor(n));
+    this.ui.setCoins(this.save.wallet.coins);
+  }
+
+  _spendCoins(n) {
+    const v = Math.max(0, Math.floor(n));
+    this.save.wallet.coins = Math.max(0, this.save.wallet.coins - v);
+    this.ui.setCoins(this.save.wallet.coins);
+    if (v > 0) this._fireEvent("spendCoins", v);
+  }
+
+  _fireEvent(eventId, value = 1) {
+    // достижения типа event/counterEvent
+    for (const a of AchievementsData) {
+      if (a.type === "event" && a.event === eventId) {
+        if (!this.save.achievements[a.id]?.unlockedAt) {
+          this.save.achievements[a.id] = { unlockedAt: Date.now(), progress: 1 };
+          this._addCoins(a.reward);
+        }
+      }
+
+      if (a.type === "counterEvent" && a.event === eventId) {
+        const st = this.save.achievements[a.id] || (this.save.achievements[a.id] = { unlockedAt: 0, progress: 0 });
+        if (st.unlockedAt) continue;
+        st.progress = (st.progress ?? 0) + value;
+        if (st.progress >= (a.target ?? 1)) {
+          st.unlockedAt = Date.now();
+          this._addCoins(a.reward);
+        }
+      }
+    }
+
+    // служебные события
+    if (eventId === "refreshShop") {
+      // перерисовать магазин, если открыт
+      if (this.shop && this.ui.overlay.style.display !== "none" && this.ui.overlayTitle.textContent === "Магазин") {
+        this.ui.showOverlay("Магазин", this.shop.renderHTML());
+        this.shop.bind(this.ui.overlayBody);
+      }
+    }
+
+    if (eventId === "refreshGarage") {
+      // перерисовать гараж, если открыт
+      if (this.garage && this.ui.overlay.style.display !== "none" && this.ui.overlayTitle.textContent === "Гараж") {
+        this.ui.showOverlay("Гараж", this.garage.renderHTML());
+        this.garage.bind(this.ui.overlayBody);
+      }
+    }
+
+    // спец: “все трассы” endless
+    if (eventId.startsWith("endlessTrack_")) {
+      const st = this.save.achievements["tracks_all"] || (this.save.achievements["tracks_all"] = { unlockedAt: 0, progress: 0, seen: {} });
+      if (!st.seen) st.seen = {};
+      const tid = eventId.replace("endlessTrack_", "");
+      if (!st.seen[tid]) {
+        st.seen[tid] = true;
+        st.progress = Object.keys(st.seen).length;
+      }
+      if (!st.unlockedAt && st.progress >= 6) {
+        st.unlockedAt = Date.now();
+        const a = AchievementsData.find(x => x.id === "tracks_all");
+        if (a) this._addCoins(a.reward);
+      }
+    }
+  }
+
+  _checkProgressAchievements() {
+    for (const a of AchievementsData) {
+      if (a.type === "event" || a.type === "counterEvent") continue;
+
+      const prog = this._getProgressForType(a);
+      if (prog >= (a.target ?? 1)) {
+        if (!this.save.achievements[a.id]?.unlockedAt) {
+          this.save.achievements[a.id] = { unlockedAt: Date.now(), progress: prog };
+          this._addCoins(a.reward);
+        }
+      }
+    }
+  }
+
+  _getProgressForType(a) {
+    const s = this.save.stats;
+    if (a.type === "totalDistance") return s.totalDistance;
+    if (a.type === "totalOvertakes") return s.totalOvertakes;
+    if (a.type === "totalNitroSeconds") return s.totalNitroSeconds;
+    if (a.type === "totalCrashes") return s.totalCrashes;
+    if (a.type === "totalRaces") return s.totalRaces;
+    if (a.type === "totalWins") return s.totalWins;
+    if (a.type === "totalCoinsEarned") return s.totalCoinsEarned;
+    if (a.type === "totalPlayTime") return s.totalPlayTime;
+    if (a.type === "endlessBestDistance") return this.save.records.endlessBestDistance;
+    if (a.type === "bestSurvive") return s.bestSurvive;
+    if (a.type === "bestNoCrash") return s.bestNoCrash;
+    return 0;
+  }
+
+  render() {
+    const ctx = this.ctx;
+
+    // фон
+    const pal = this.track.palette;
+    const g = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
+    g.addColorStop(0, pal.sky0);
+    g.addColorStop(0.6, pal.sky1);
+    g.addColorStop(1, "#02020a");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // светящиеся “дымки”
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    drawGlow(ctx, CANVAS_W * 0.25, CANVAS_H * 0.25, 320, pal.glow, 0.10);
+    drawGlow(ctx, CANVAS_W * 0.75, CANVAS_H * 0.28, 380, pal.accent, 0.09);
+    ctx.restore();
+
+    // дорога
+    this._renderRoad(ctx);
+
+    // объекты мира
+    for (const p of this.powerUps) p.render(ctx, (x, z, cz) => this.toScreen(x, z, cz), this.cameraZ);
+    for (const c of this.trafficPool) if (c.active) c.render(ctx, (x, z, cz) => this.toScreen(x, z, cz), this.cameraZ);
+    if (this.mode === GAME_MODES.CAREER) {
+      for (const r of this.rivals) r.render(ctx, (x, z, cz) => this.toScreen(x, z, cz), this.cameraZ);
+    }
+
+    // игрок
+    const px = CANVAS_W * 0.5 + this.player.x * 0.62;
+    const py = CANVAS_H * 0.78;
+    this.player.render(ctx, px, py);
+
+    // частицы поверх
+    if (this.save.settings.showParticles) this.particles.render(ctx);
+
+    // спидометр
+    this.speedometer.render(ctx);
+
+    // миникарта
+    this._renderMinimap();
+
+    // если gameover — подсказка в тост
+    if (this.state === "gameover") {
+      // показываем панель паузы, она уже включена
+      // доп. текст через toast
+      if (!this._gameOverToastLatch) {
+        this._gameOverToastLatch = true;
+        this.ui.toastMsg("Game Over • Рестарт или в меню");
+      }
+    } else {
+      this._gameOverToastLatch = false;
+    }
+  }
+
+  _renderRoad(ctx) {
+    // перспектива: рисуем полосы сегментами
+    const bottomY = CANVAS_H * 0.88;
+    const topY = CANVAS_H * 0.12;
+
+    // тематичные цвета в зависимости от трассы
+    const themeColors = {
+      city: { road: ["rgba(5,8,22,0.95)", "rgba(7,11,30,0.95)"], border: "rgba(0,229,255,0.17)", lane: "rgba(255,43,214,0.12)" },
+      mountain: { road: ["rgba(12,10,8,0.95)", "rgba(15,13,10,0.95)"], border: "rgba(255,255,255,0.12)", lane: "rgba(255,255,255,0.10)" },
+      tokyo: { road: ["rgba(8,5,15,0.95)", "rgba(12,7,20,0.95)"], border: "rgba(255,0,128,0.14)", lane: "rgba(255,0,128,0.10)" },
+      desert: { road: ["rgba(20,16,10,0.95)", "rgba(24,19,12,0.95)"], border: "rgba(255,165,0,0.15)", lane: "rgba(255,165,0,0.11)" },
+      highway: { road: ["rgba(6,6,12,0.95)", "rgba(9,9,18,0.95)"], border: "rgba(0,255,255,0.12)", lane: "rgba(0,255,255,0.09)" },
+      megacity: { road: ["rgba(4,8,14,0.95)", "rgba(6,11,18,0.95)"], border: "rgba(0,255,128,0.13)", lane: "rgba(0,255,128,0.10)" },
+    };
+    const col = themeColors[this.track.theme] || themeColors.city;
+
+    // центральная линия по кривизне
+    const steps = 80;
+    let lastCenterX = CANVAS_W * 0.5;
+
+    for (let i = 0; i < steps; i++) {
+      const t0 = i / steps;
+      const t1 = (i + 1) / steps;
+
+      const y0 = lerp(bottomY, topY, t0);
+      const y1 = lerp(bottomY, topY, t1);
+
+      const z0 = this.cameraZ + t0 * 1600;
+      const z1 = this.cameraZ + t1 * 1600;
+
+      const c0 = this.track.sampleCurve(z0);
+      const c1 = this.track.sampleCurve(z1);
+
+      const scale0 = lerp(ROAD.perspective.bottomScale, ROAD.perspective.topScale, t0);
+      const scale1 = lerp(ROAD.perspective.bottomScale, ROAD.perspective.topScale, t1);
+
+      const roadW0 = (ROAD.lanes * ROAD.laneWidth + ROAD.shoulder * 2) * scale0;
+      const roadW1 = (ROAD.lanes * ROAD.laneWidth + ROAD.shoulder * 2) * scale1;
+
+      const centerX0 = CANVAS_W * 0.5 + c0 * 260 * (1 - t0);
+      const centerX1 = CANVAS_W * 0.5 + c1 * 260 * (1 - t1);
+
+      // асфальт (тематичный)
+      ctx.fillStyle = i % 2 === 0 ? col.road[0] : col.road[1];
+      ctx.beginPath();
+      ctx.moveTo(centerX0 - roadW0 * 0.5, y0);
+      ctx.lineTo(centerX0 + roadW0 * 0.5, y0);
+      ctx.lineTo(centerX1 + roadW1 * 0.5, y1);
+      ctx.lineTo(centerX1 - roadW1 * 0.5, y1);
+      ctx.closePath();
+      ctx.fill();
+
+      // бордюр/неон (тематичный)
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = col.border.replace("0.17", `${0.10 + 0.07*(1-t0)}`);
+      ctx.lineWidth = Math.max(1, 3 * scale0);
+      ctx.beginPath();
+      ctx.moveTo(centerX0 - roadW0 * 0.5, y0);
+      ctx.lineTo(centerX1 - roadW1 * 0.5, y1);
+      ctx.moveTo(centerX0 + roadW0 * 0.5, y0);
+      ctx.lineTo(centerX1 + roadW1 * 0.5, y1);
+      ctx.stroke();
+      ctx.restore();
+
+      // разметка (тематичная)
+      const laneW0 = ROAD.laneWidth * scale0;
+      const laneW1 = ROAD.laneWidth * scale1;
+
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      for (let l = 1; l < ROAD.lanes; l++) {
+        const lx0 = centerX0 - roadW0 * 0.5 + ROAD.shoulder * scale0 + laneW0 * l;
+        const lx1 = centerX1 - roadW1 * 0.5 + ROAD.shoulder * scale1 + laneW1 * l;
+        const dash = (i + Math.floor(this.cameraZ / 60)) % 2 === 0;
+        if (!dash) continue;
+
+        ctx.strokeStyle = col.lane;
+        ctx.lineWidth = Math.max(1, 2.2 * scale0);
+        ctx.beginPath();
+        ctx.moveTo(lx0, y0);
+        ctx.lineTo(lx1, y1);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      lastCenterX = centerX0;
+    }
+
+    // неоновая линия “старта” в карьере
+    if (this.mode === GAME_MODES.CAREER) {
+      const z = (Math.floor(this.cameraZ / this.track.lengthZ) * this.track.lengthZ);
+      const p0 = this.toScreen(0, z, this.cameraZ);
+      if (p0.visible) {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        ctx.strokeStyle = "rgba(166,255,0,0.35)";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(p0.x - 260 * p0.scale, p0.y);
+        ctx.lineTo(p0.x + 260 * p0.scale, p0.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
+  toScreen(worldX, worldZ, cameraZ) {
+    // преобразование world -> screen с перспективой
+    const dz = worldZ - cameraZ;
+    if (dz < 0) return { visible: false, x: 0, y: 0, scale: 0 };
+    if (dz > 1800) return { visible: false, x: 0, y: 0, scale: 0 };
+
+    const t = dz / 1800;
+    const y = lerp(CANVAS_H * 0.86, CANVAS_H * 0.14, t);
+    const scale = lerp(ROAD.perspective.bottomScale, ROAD.perspective.topScale, t);
+
+    const curve = this.track.sampleCurve(cameraZ + dz);
+    const centerX = CANVAS_W * 0.5 + curve * 260 * (1 - t);
+
+    const x = centerX + worldX * scale;
+
+    return { visible: true, x, y, scale };
+  }
+
+  _renderMinimap() {
+    const ctx = this.minimapCtx;
+    const w = ctx.canvas.width;
+    const h = ctx.canvas.height;
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(0, 0, w, h);
+
+    // трасса как линия кривизны
+    ctx.save();
+    ctx.strokeStyle = "rgba(0,229,255,0.35)";
+    ctx.lineWidth = 2;
+    roundRect(ctx, 0, 0, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    // трасса
+    ctx.fillStyle = "rgba(0,229,255,0.08)";
+    ctx.fillRect(8, 8, w - 16, h - 16);
+
+    // игрок — крупная иконка
+    const playerZ = this.player.z - this.cameraZ;
+    if (playerZ >= 0 && playerZ <= 2400) {
+      const t = playerZ / 2400;
+      const py = y + h - 16 - t * (h - 32);
+      const px = x + w / 2 + (this.player.x / 500) * 40;
+      ctx.fillStyle = "#00e5ff";
+      ctx.shadowColor = "#00e5ff";
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // трафик — мелкие точки
+    ctx.fillStyle = "rgba(255,43,214,0.7)";
+    for (const c of this.trafficPool) {
+      if (!c.active) continue;
+      const dz = c.z - this.cameraZ;
+      if (dz < 0 || dz > 2400) continue;
+      const t = dz / 2400;
+      const ty = y + h - 16 - t * (h - 32);
+      const tx = x + w / 2 + (c.x / 500) * 40;
+      ctx.fillRect(tx - 1, ty - 1, 2, 2);
+    }
+
+    // соперники — зелёные
+    if (this.mode === GAME_MODES.CAREER) {
+      ctx.fillStyle = "rgba(166,255,0,0.85)";
+      for (const r of this.rivals) {
+        const dz = r.z - this.cameraZ;
+        if (dz < 0 || dz > 2400) continue;
+        const t = dz / 2400;
+        const ty = y + h - 16 - t * (h - 32);
+        const tx = x + w / 2 + (r.x / 500) * 40;
+        ctx.fillRect(tx - 1, ty - 1, 2, 2);
+      }
+    }
+
+    // powerups
+    ctx.fillStyle = "rgba(255,215,0,0.9)";
+    for (const p of this.powerUps) {
+      if (!p.active) continue;
+      const dz = p.z - this.cameraZ;
+      if (dz < 0 || dz > 2400) continue;
+      const t = dz / 2400;
+      const ty = y + h - 16 - t * (h - 32);
+      const tx = x + w / 2 + (p.x / 500) * 40;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+toScreen(worldX, worldZ, cameraZ) {
+  // преобразование world -> screen с перспективой
+  const dz = worldZ - cameraZ;
+  if (dz < 0) return { visible: false, x: 0, y: 0, scale: 0 };
+  if (dz > 1800) return { visible: false, x: 0, y: 0, scale: 0 };
+
+  const t = dz / 1800;
+  const y = lerp(CANVAS_H * 0.86, CANVAS_H * 0.14, t);
+  const scale = lerp(ROAD.perspective.bottomScale, ROAD.perspective.topScale, t);
+
+  const curve = this.track.sampleCurve(cameraZ + dz);
+  const centerX = CANVAS_W * 0.5 + curve * 260 * (1 - t);
+
+  const x = centerX + worldX * scale;
+
+  return { visible: true, x, y, scale };
+}
+
+_renderMinimap() {
+  const ctx = this.minimapCtx;
+  if (!ctx) return;
+
+  const w = 180;
+  const h = 100;
+  const x = CANVAS_W - w - 12;
+  const y = 12;
+
+  // фон
+  ctx.fillStyle = "rgba(8,12,28,0.86)";
+  ctx.strokeStyle = "rgba(0,229,255,0.2)";
+  ctx.lineWidth = 2;
+  roundRect(ctx, x, y, w, h, 8);
+  ctx.fill();
+  ctx.stroke();
+
+  // трасса
+  ctx.fillStyle = "rgba(0,229,255,0.08)";
+  ctx.fillRect(x + 8, y + 8, w - 16, h - 16);
+
+  // игрок — крупная иконка
+  const playerZ = this.player.z - this.cameraZ;
+  if (playerZ >= 0 && playerZ <= 2400) {
+    const t = playerZ / 2400;
+    const py = y + h - 16 - t * (h - 32);
+    const px = x + w / 2 + (this.player.x / 500) * 40;
+    ctx.fillStyle = "#00e5ff";
+    ctx.shadowColor = "#00e5ff";
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // трафик — мелкие точки
+  ctx.fillStyle = "rgba(255,43,214,0.7)";
+  for (const c of this.trafficPool) {
+    if (!c.active) continue;
+    const dz = c.z - this.cameraZ;
+    if (dz < 0 || dz > 2400) continue;
+    const t = dz / 2400;
+    const ty = y + h - 16 - t * (h - 32);
+    const tx = x + w / 2 + (c.x / 500) * 40;
+    ctx.fillRect(tx - 1, ty - 1, 2, 2);
+  }
+
+  // соперники — зелёные
+  if (this.mode === GAME_MODES.CAREER) {
+    ctx.fillStyle = "rgba(166,255,0,0.85)";
+    for (const r of this.rivals) {
+      const dz = r.z - this.cameraZ;
+      if (dz < 0 || dz > 2400) continue;
+      const t = dz / 2400;
+      const ty = y + h - 16 - t * (h - 32);
+      const tx = x + w / 2 + (r.x / 500) * 40;
+      ctx.fillRect(tx - 1, ty - 1, 2, 2);
+    }
+  }
+
+  // powerups
+  ctx.fillStyle = "rgba(255,215,0,0.9)";
+  for (const p of this.powerUps) {
+    if (!p.active) continue;
+    const dz = p.z - this.cameraZ;
+    if (dz < 0 || dz > 2400) continue;
+    const t = dz / 2400;
+    const ty = y + h - 16 - t * (h - 32);
+    const tx = x + w / 2 + (p.x / 500) * 40;
+    ctx.beginPath();
+    ctx.arc(tx, ty, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+} // конец класса Game
