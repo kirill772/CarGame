@@ -31,8 +31,14 @@ export class TrafficCar {
     this.z = z;
     this.speed = speed;
     this.color0 = color0 ?? pick(["#141a2f", "#1a1230", "#102132", "#1d1e2f"]);
-    this.neon = neon ?? (Math.random() < 0.5 ? COLORS.neonCyan : COLORS.neonMagenta);
+    this.neon   = neon   ?? (Math.random() < 0.5 ? COLORS.neonCyan : COLORS.neonMagenta);
     this._blink = rand(0, 1000);
+
+    // назначаем случайный skin и carId для renderCar3D
+    const trafficColors = ["#1a2040","#20102a","#101830","#0e1a28","#1a1010","#181a10"];
+    this.skin  = this.neon;
+    this.carId = null; // трафик использует generic стиль
+    this.color0 = color0 ?? pick(trafficColors);
   }
 
   update(dt) {
@@ -42,7 +48,6 @@ export class TrafficCar {
 
   render(ctx, toScreenFn, cameraZ) {
     if (!this.active) return;
-
     const screen = toScreenFn(this.x, this.z, cameraZ);
     if (!screen.visible) return;
 
@@ -50,8 +55,8 @@ export class TrafficCar {
     ctx.translate(screen.x, screen.y);
     ctx.scale(screen.scale, screen.scale);
 
-    // 3D-машина трафика
-    renderCar3D(ctx, 0, 0, this.carId, this.skin, 1.2);
+    // Используем renderCar3D с skin машины трафика (едет вниз = facing down)
+    renderCar3D(ctx, 0, 0, this.carId, this.skin, 1.0, "down");
 
     ctx.restore();
   }

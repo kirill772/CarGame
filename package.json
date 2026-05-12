@@ -4,7 +4,7 @@
   "description": "My HTML5 game",
   "main": "index.html",
   "scripts": {
-    "start": "node index.html"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2"
