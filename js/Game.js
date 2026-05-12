@@ -12,6 +12,7 @@ import { ParticleSystem } from "./managers/ParticleSystem.js";
 import { CarsData } from "./data/CarsData.js";
 import { AchievementsData } from "./data/AchievementsData.js";
 import { Speedometer } from "./managers/Speedometer.js";
+import { Renderer3D } from "./Renderer3D.js";
 
 // Вспомогательные функции
 function roundRect(ctx, x, y, w, h, r) {
@@ -44,11 +45,28 @@ function colorToRgba(hex, a) {
 export class Game {
   constructor({ canvas, ctx, save, ui, input, audio }) {
     this.canvas = canvas;
-    this.ctx = ctx;
+    this.ctx = ctx;         // может быть null если 3D включён
     this.save = save;
     this.ui = ui;
     this.input = input;
     this.audio = audio;
+
+    // ── 3D рендерер ──────────────────────────────────────────────────────────
+    // Получаем canvas для Three.js из DOM (добавлен в index.html)
+    this._canvas3d = document.getElementById("game3d");
+    this._renderer3d = null;
+    if (this._canvas3d) {
+      try {
+        this._renderer3d = new Renderer3D(this._canvas3d);
+      } catch (e) {
+        console.warn("Three.js Renderer3D init failed:", e);
+        this._renderer3d = null;
+      }
+    }
+    // 2D canvas используем только для миникарты (скрываем основной)
+    if (this._renderer3d && this.canvas) {
+      this.canvas.style.display = "none";
+    }
 
     this.state = "menu"; // menu | playing | paused | gameover | overlay
 
@@ -103,8 +121,9 @@ export class Game {
     // полоса/границы
     this.laneXs = this._calcLaneCenters();
 
-    // миникарта
-    this.minimapCtx = document.getElementById("minimap").getContext("2d");
+    // миникарта — рисуем прямо на #game (2D HUD canvas), не на отдельный элемент
+    const hudCanvas = document.getElementById("game");
+    this.minimapCtx = hudCanvas ? hudCanvas.getContext("2d") : null;
 
     this._applySelectedCar();
     this.ui.setCoins(this.save.wallet.coins);
@@ -134,6 +153,13 @@ export class Game {
     };
 
     this.player.applyCarConfig({ baseStats: car.stats, upgradesMult, skin: this.save.garage.selectedSkin ?? "#00e5ff", carData: car });
+
+    // Синхронизируем цвета с 3D рендерером
+    if (this._renderer3d) {
+      const bodyHex = car.color || "#ff4d4d";
+      const neonHex = this.save.garage.selectedSkin ?? "#00e5ff";
+      this._renderer3d.setPlayerCarSkin(bodyHex, neonHex);
+    }
   }
 
   onUIAction(action) {
@@ -484,6 +510,11 @@ export class Game {
 
     // фиксируем событие “игра на трассе”
     if (mode === GAME_MODES.ENDLESS) this._fireEvent(`endlessTrack_${this.track.id}`);
+
+    // Применяем тему к 3D рендереру
+    if (this._renderer3d) {
+      this._renderer3d.setTheme(this.track.theme);
+    }
   }
 
   update(dt) {
@@ -514,6 +545,7 @@ export class Game {
     }
 
     this.worldTime += dt;
+    this._lastDt    = dt;
 
     // slowmo
     let worldDt = dt;
@@ -688,6 +720,9 @@ export class Game {
     // аудио
     this.audio.updateEngine(this.player.engineRpm, this.player.maxSpeed ? this.player.speed / this.player.maxSpeed : 0, inp.nitro, false);
     this.audio.updateDrift(this.player.driftHeat, false);
+    // сохраняем для 3D рендера
+    this._lastSteer = inp.steer;
+    this._lastNitro = inp.nitro;
 
     // статистика
     this.save.stats.totalNitroSeconds += inp._nitroSeconds;
@@ -1023,8 +1058,49 @@ export class Game {
   }
 
   render() {
-    const ctx = this.ctx;
+    // ── 3D рендер (Three.js) ─────────────────────────────────────────────────
+    if (this._renderer3d && this.state === "playing") {
+      const inp = this.input.poll ? this.input.poll() : { nitro: false, steer: 0 };
+      // Очищаем HUD canvas каждый кадр
+      if (this.minimapCtx) {
+        const hc = this.minimapCtx.canvas;
+        this.minimapCtx.clearRect(0, 0, hc.width, hc.height);
+      }
+      this._renderer3d.render({
+        playerX:        this.player.x,
+        playerSpeed:    this.player.speed,
+        playerMaxSpeed: this.player.maxSpeed || 980,
+        playerZ:        this.player.z,
+        steer:          this._lastSteer || 0,
+        driftHeat:      this.player.driftHeat || 0,
+        nitroActive:    this._lastNitro || false,
+        health01:       this.player.health / PLAYER.healthMax,
+        cameraZ:        this.cameraZ,
+        track:          this.track,
+        trafficCars:    this.trafficPool,
+        dt:             this._lastDt || 0.016,
+      });
+      // Миникарта всё ещё рисуется на 2D canvas
+      this._renderMinimap();
+      // Спидометр поверх через 2D HUD canvas
+      const hudCtx = this.minimapCtx;
+      if (hudCtx) {
+        // Очищаем только область спидометра чтобы не затирать миникарту
+        this.speedometer.render(hudCtx);
+      }
+      // gameover тост
+      if (this.state === "gameover" && !this._gameOverToastLatch) {
+        this._gameOverToastLatch = true;
+        this.ui.toastMsg("Game Over • Рестарт или в меню");
+      } else if (this.state !== "gameover") {
+        this._gameOverToastLatch = false;
+      }
+      return;
+    }
 
+    // ── 2D fallback (если 3D не доступен или состояние не playing) ───────────
+    const ctx = this.ctx;
+    if (!ctx) return;
     // фон
     const pal = this.track.palette;
     const g = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
@@ -1326,8 +1402,10 @@ export class Game {
   _renderMinimap() {
     const ctx = this.minimapCtx;
     if (!ctx) return;
+    const cw = ctx.canvas.width;
+    const ch = ctx.canvas.height;
     const w = 180, h = 100;
-    const mx = CANVAS_W - w - 12, my = 12;
+    const mx = cw - w - 16, my = 16;
 
     ctx.fillStyle   = "rgba(5,8,20,0.90)";
     ctx.strokeStyle = "rgba(0,229,255,0.24)";

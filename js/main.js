@@ -9,11 +9,24 @@ import { InputManager } from "./managers/InputManager.js";
 import { AudioManager } from "./managers/AudioManager.js";
 import { Game } from "./Game.js";
 
+// 2D canvas — для миникарты и спидометра
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 
-canvas.width = CANVAS_W;
-canvas.height = CANVAS_H;
+// Размер HUD canvas = размер окна (не 1280×720, т.к. fullscreen 3D)
+function resizeHUD() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resizeHUD();
+window.addEventListener("resize", resizeHUD);
+
+// Убираем из потока (Three.js рисует поверх на #game3d)
+canvas.style.position = "absolute";
+canvas.style.inset     = "0";
+canvas.style.pointerEvents = "none";
+canvas.style.zIndex   = "1";
+canvas.style.background = "transparent";
 
 const save = loadSave();
 

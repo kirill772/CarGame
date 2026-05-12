@@ -31,8 +31,11 @@ export class Speedometer {
   }
 
   render(ctx) {
+    // Позиция динамическая — центр-низ актуального canvas
+    const cw = ctx.canvas.width;
+    const ch = ctx.canvas.height;
     ctx.save();
-    ctx.translate(this.x, this.y);
+    ctx.translate(cw * 0.5, ch - 75);
 
     // тень
     ctx.shadowColor = "rgba(0,0,0,0.4)";

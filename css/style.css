@@ -34,7 +34,7 @@
 html, body {
   height: 100%;
   margin: 0;
-  background: radial-gradient(ellipse 140% 100% at 50% 80%, #060a24 0%, var(--bg) 55%, #000 100%);
+  background: #000;
   color: var(--text);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   overflow: hidden;
@@ -42,23 +42,31 @@ html, body {
 
 /* ── app / canvas ────────────────────────────────────────────────── */
 #app {
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 12px;
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: #000;
 }
 
+/* Three.js 3D canvas — занимает весь экран, z=0 */
+canvas#game3d {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+  z-index: 0;
+}
+
+/* 2D HUD canvas — прозрачный, поверх 3D, под UI */
 canvas#game {
-  width: min(1280px, 100%);
-  height: auto;
-  border-radius: 26px;
-  background: linear-gradient(180deg, #030410 0%, #020309 60%, #040614 100%);
-  box-shadow:
-    0 40px 100px rgba(0,0,0,.75),
-    0 0 0 1px rgba(0,229,255,.12),
-    0 0 60px rgba(0,229,255,.05) inset;
-  outline: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  pointer-events: none;
+  z-index: 1;
 }
 
 
@@ -67,6 +75,7 @@ canvas#game {
   position: fixed;
   inset: 0;
   pointer-events: none;
+  z-index: 2;          /* поверх обоих canvas */
 }
 .screen, .hud, .topbar, .pause, .toast, .touch { pointer-events: auto; }
 
@@ -140,6 +149,9 @@ canvas#game {
   align-items: center;
   justify-content: center;
   padding: 20px;
+  z-index: 3;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(4px);
 }
 
 .panel {
