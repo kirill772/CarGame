@@ -100,9 +100,26 @@ export class UIManager {
     this.pause.classList.toggle("hidden", !on);
   }
 
-  showOverlay(title, html) {
+  showOverlay(title, html, fullscreen = false) {
     this.overlayTitle.textContent = title;
     this.overlayBody.innerHTML = html;
+    // для гаража — убираем grid-сетку overlay, расширяем panel
+    const panel = this.screenOverlayList.querySelector(".panel");
+    if (panel) {
+      if (fullscreen) {
+        panel.style.width = "min(1200px,100%)";
+        panel.style.maxHeight = "90vh";
+        panel.style.padding   = "18px";
+        this.overlayBody.style.maxHeight = "80vh";
+        this.overlayBody.style.gridTemplateColumns = "1fr";
+      } else {
+        panel.style.width    = "";
+        panel.style.maxHeight = "";
+        panel.style.padding   = "";
+        this.overlayBody.style.maxHeight = "";
+        this.overlayBody.style.gridTemplateColumns = "";
+      }
+    }
     this.screenOverlayList.classList.remove("hidden");
     this.screenMenu.classList.add("hidden");
     this.setTopbarVisible(true);

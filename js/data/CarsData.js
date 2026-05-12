@@ -33,7 +33,7 @@ export const CarsData = [
     name: "Porsche 911 Turbo S",
     price: 15000,
     stats: { maxSpeed: 9, acceleration: 9, handling: 9, nitroPower: 7, durability: 7 },
-    color: "#silver",
+    color: "#c0c0c8",
     stripe: "#000000",
   },
   {
